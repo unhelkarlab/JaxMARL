@@ -14,3 +14,5 @@ tmp/
 *-checkpoint.py
 wandb/
 outputs/
+
+jaxmarl-venv/*
