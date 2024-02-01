@@ -79,6 +79,7 @@ class Overcooked(MultiAgentEnv):
         # Observations given by 26 channels, most of which are boolean masks
         self.height = layout["height"]
         self.width = layout["width"]
+        # TODO: Need to change
         self.obs_shape = (self.width, self.height, 26)
 
         # Hard coded. Only affects map padding -- not observations.
@@ -86,6 +87,7 @@ class Overcooked(MultiAgentEnv):
         self.layout = layout
         self.agents = ["agent_0", "agent_1"]
 
+        # TODO: Need to change
         self.action_set = jnp.array([
             Actions.right,
             Actions.down,
@@ -123,6 +125,7 @@ class Overcooked(MultiAgentEnv):
         # '.take()' takes elements from an array along an axis.
         acts = self.action_set.take(
             indices=jnp.array([actions["agent_0"], actions["agent_1"]]))
+
         # Execute the agents' actions in the environment
         state, reward = self.step_agents(key, state, acts)
 
@@ -201,6 +204,10 @@ class Overcooked(MultiAgentEnv):
         # position not provided
         agent_idx = random_reset * agent_idx + (1 - random_reset) * layout.get(
             "agent_idx", agent_idx)
+        # The position of each agent is as follows: the grid number along the
+        # positive x axis, and the grid number along the negative y axis,
+        # with the top left grid having coordinate (0, 0). All valid
+        # coordinates are positive
         agent_pos = jnp.array(
             [agent_idx % w, agent_idx // w],
             dtype=jnp.uint32).transpose()  # dim = n_agents x 2
@@ -216,23 +223,28 @@ class Overcooked(MultiAgentEnv):
 
         # Keep track of empty counter space (i.e. onion pile and plate pile)
         empty_table_mask = jnp.zeros_like(all_pos)
+        # The wall is empty counter space
         empty_table_mask = empty_table_mask.at[wall_idx].set(1)
 
+        # Delivery locations are not empty counter space
         goal_idx = layout.get("goal_idx")
         goal_pos = jnp.array([goal_idx % w, goal_idx // w],
                              dtype=jnp.uint32).transpose()
         empty_table_mask = empty_table_mask.at[goal_idx].set(0)
 
+        # The locations of onion piles are not empty counter space
         onion_pile_idx = layout.get("onion_pile_idx")
         onion_pile_pos = jnp.array([onion_pile_idx % w, onion_pile_idx // w],
                                    dtype=jnp.uint32).transpose()
         empty_table_mask = empty_table_mask.at[onion_pile_idx].set(0)
 
+        # The locations of plate piles are not empty counter space
         plate_pile_idx = layout.get("plate_pile_idx")
         plate_pile_pos = jnp.array([plate_pile_idx % w, plate_pile_idx // w],
                                    dtype=jnp.uint32).transpose()
         empty_table_mask = empty_table_mask.at[plate_pile_idx].set(0)
 
+        # Pot locations are not empty counter space
         pot_idx = layout.get("pot_idx")
         pot_pos = jnp.array([pot_idx % w, pot_idx // w],
                             dtype=jnp.uint32).transpose()
@@ -365,7 +377,10 @@ class Overcooked(MultiAgentEnv):
         padding = (state.maze_map.shape[0] - height) // 2
 
         # Get the maze map without paddings and only showing the item id
+        # maze_map is a 2D array whose number of rows equals the height of the
+        # layout and number columns equals to width of the layout
         maze_map = state.maze_map[padding:-padding, padding:-padding, 0]
+
         # A 2D array of 0s and 1s indicating if a location has soup
         soup_loc = jnp.array(maze_map == OBJECT_TO_INDEX["dish"],
                              dtype=jnp.uint8)
@@ -376,20 +391,26 @@ class Overcooked(MultiAgentEnv):
         # A 2D array indicating the status of the pot at a location
         pot_status = state.maze_map[padding:-padding, padding:-padding,
                                     2] * pot_loc_layer
-        # A 2D array indicating the number of tomatoes in a non-cooking/-done
-        # pot at a location
+        # A 2D array indicating the number of onions in a non-cooking or not
+        # done pot at a location
         onions_in_pot_layer = jnp.minimum(
             POT_EMPTY_STATUS - pot_status, MAX_ONIONS_IN_POT) * (
                 pot_status >= POT_FULL_STATUS
             )  # 0/1/2/3, as long as not cooking or not done
+        # A 2D array indicating the number of onions in a cooking/done pot or
+        # soup. (3 for locations with a cooking/done pot or soup and 0 o.w.)
         onions_in_soup_layer = jnp.minimum(POT_EMPTY_STATUS - pot_status, MAX_ONIONS_IN_POT) * (pot_status < POT_FULL_STATUS) \
-                               * pot_loc_layer + MAX_ONIONS_IN_POT * soup_loc   # 0/3, as long as cooking or done
+                               * pot_loc_layer + MAX_ONIONS_IN_POT * soup_loc
+        # A 2D array indicating the amount of cooking time left in the pot
+        # (if location does not have a pot, the value is 0)
         pot_cooking_time_layer = pot_status * (pot_status < POT_FULL_STATUS
                                                )  # Timer: 19 to 0
         # A 2D array indicating the locations of soups that are ready, either
         # plated or not
         soup_ready_layer = pot_loc_layer * (pot_status
                                             == POT_READY_STATUS) + soup_loc
+        # The entire layer is 1 there are {40} or fewer remaining time steps.
+        # 0 otherwise
         urgency_layer = jnp.ones(maze_map.shape, dtype=jnp.uint8) * (
             (self.max_steps - state.time) < URGENCY_CUTOFF)
 
@@ -498,6 +519,9 @@ class Overcooked(MultiAgentEnv):
         is_move_action_transposed = jnp.expand_dims(
             is_move_action, 0).transpose()  # Necessary to broadcast correctly
 
+        # Calculate the forward position of the agent.
+        # If the input is a move action, calculate the position the agent would
+        # travel to assuming there is no obstacle or another agent in front.
         # The output of 'DIR_TO_VEC[jnp.minimum(action, 3)]' is a 2D array,
         # in which the first dimension is the number of agents and the second
         # dimension contains the vectors representing the direction of the
@@ -556,7 +580,9 @@ class Overcooked(MultiAgentEnv):
                                              (self.num_agents, 1))
 
         # 'bounced' is a 2d array of shape number of agents x 1.
-        # An entry in 'bounced' is true if the agent needs to be bounced back.
+        # An entry in 'bounced' is true if the agent needs to be bounced back,
+        # which is when the forward position is blocked or the agent doesn't
+        # perform a move action.
         bounced = jnp.logical_or(fwd_pos_blocked, ~is_move_action_transposed)
 
         # Hardcoded for 2 agents (call them Alice and Bob)!!!
@@ -565,6 +591,8 @@ class Overcooked(MultiAgentEnv):
         # 'agent_pos_prev' has shape number of agents x 2
         agent_pos_prev = jnp.array(state.agent_pos)
         # 'fwd_pos' has shape number of agents x 2
+        # If the agent needs to be bounced back, set the forward position to
+        # its old position.
         fwd_pos = (bounced * state.agent_pos + (~bounced) * fwd_pos).astype(
             jnp.uint32)
 
@@ -620,6 +648,8 @@ class Overcooked(MultiAgentEnv):
         # Handle interacts. Agent 1 first, agent 2 second, no collision
         # handling.
         # This matches the original Overcooked
+        # Calculate the position in front of the agent so that the agent can
+        # potentially interact with that position.
         fwd_pos = state.agent_pos + state.agent_dir
         maze_map = state.maze_map
         # print(maze_map)
