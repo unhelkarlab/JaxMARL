@@ -21,6 +21,7 @@ from jaxmarl.environments.overcooked.common import (OBJECT_TO_INDEX,
                                                     make_overcooked_map)
 from jaxmarl.environments.overcooked.layouts import overcooked_layouts as \
     layouts
+from transformers import RobertaTokenizer
 
 
 class Actions(IntEnum):
@@ -32,6 +33,30 @@ class Actions(IntEnum):
     stay = 4
     interact = 5
     done = 6
+    comm = 7
+
+
+# class Communication():
+#     info_template = 11 # 'I am going to '
+#     info_options = [
+#         OBJECT_TO_INDEX['onion_pile'], OBJECT_TO_INDEX['plate_pile'],
+#         OBJECT_TO_INDEX['goal'], OBJECT_TO_INDEX['pot'],
+#         OBJECT_TO_INDEX['dish']
+#     ]
+
+#     request_template = 12 # 'I need '
+#     request_options = [
+#         OBJECT_TO_INDEX['onion'], OBJECT_TO_INDEX['plate'],
+#         OBJECT_TO_INDEX['dish']
+#     ]
+
+
+class Communication():
+    info_template = 'I am going to '
+    info_options = ['onion_pile', 'plate_pile', 'goal', 'pot', 'dish']
+
+    request_template = 'I need '
+    request_options = ['onion', 'plate', 'dish']
 
 
 @struct.dataclass
@@ -44,6 +69,7 @@ class State:
     pot_pos: chex.Array
     wall_map: chex.Array
     maze_map: chex.Array
+    agent_comm: chex.Array
     time: int
     terminal: bool
 
@@ -66,12 +92,11 @@ DELIVERY_REWARD = 20
 class Overcooked(MultiAgentEnv):
     """Vanilla Overcooked"""
 
-    def __init__(
-        self,
-        layout=FrozenDict(layouts["cramped_room"]),
-        random_reset: bool = False,
-        max_steps: int = 400,
-    ):
+    def __init__(self,
+                 layout=FrozenDict(layouts["cramped_room"]),
+                 random_reset: bool = False,
+                 max_steps: int = 400,
+                 tokenizer=RobertaTokenizer.from_pretrained('roberta-base')):
         # Sets self.num_agents to 2
         super().__init__(num_agents=2)
 
@@ -89,22 +114,17 @@ class Overcooked(MultiAgentEnv):
 
         # TODO: Need to change
         self.action_set = jnp.array([
-            Actions.right,
-            Actions.down,
-            Actions.left,
-            Actions.up,
-            Actions.stay,
-            Actions.interact,
+            Actions.right, Actions.down, Actions.left, Actions.up,
+            Actions.stay, Actions.interact, Actions.comm
         ])
+        self.tokenizer = tokenizer
 
         self.random_reset = random_reset
         self.max_steps = max_steps
 
     def step_env(
-        self,
-        key: chex.PRNGKey,
-        state: State,
-        actions: Dict[str, chex.Array],
+        self, key: chex.PRNGKey, state: State, actions: Dict[str, chex.Array],
+        msgs: chex.Array
     ) -> Tuple[Dict[str, chex.Array], State, Dict[str, float], Dict[str, bool],
                Dict]:
         """
@@ -127,7 +147,7 @@ class Overcooked(MultiAgentEnv):
             indices=jnp.array([actions["agent_0"], actions["agent_1"]]))
 
         # Execute the agents' actions in the environment
-        state, reward = self.step_agents(key, state, acts)
+        state, reward = self.step_agents(key, state, acts, msgs)
 
         state = state.replace(time=state.time + 1)
 
@@ -292,6 +312,19 @@ class Overcooked(MultiAgentEnv):
             (1-random_reset) * jnp.array(
                 [OBJECT_TO_INDEX['empty'], OBJECT_TO_INDEX['empty']])
 
+        agent_comm = []
+        for i in range(len(self.agents)):
+            encoded_text = self.tokenizer.encode_plus(
+                '',
+                add_special_tokens=True,
+                truncation=True,
+                max_length=128,
+                padding='max_length',
+                return_attention_mask=True,
+                return_tensors='np')
+            agent_comm.append(encoded_text['input_ids'][0])
+        agent_comm = jnp.array(np.array(agent_comm))
+
         state = State(
             agent_pos=agent_pos,
             agent_dir=agent_dir,
@@ -301,6 +334,7 @@ class Overcooked(MultiAgentEnv):
             pot_pos=pot_pos,
             wall_map=wall_map.astype(jnp.bool_),
             maze_map=maze_map,
+            agent_comm=agent_comm,
             time=0,
             terminal=False,
         )
@@ -312,7 +346,7 @@ class Overcooked(MultiAgentEnv):
     def get_obs(self, state: State) -> Dict[str, chex.Array]:
         """
         Return a full observation, of size (height x width x n_layers), where
-        n_layers = 26.
+        n_layers = 26, together with the communication msgs.
         Layers are of shape (height x width) and  are binary (0/1) except where
         indicated otherwise.
         The obs is very sparse (most elements are 0), which prob. contributes
@@ -497,14 +531,21 @@ class Overcooked(MultiAgentEnv):
         alice_obs = jnp.transpose(alice_obs, (1, 2, 0))
         bob_obs = jnp.transpose(bob_obs, (1, 2, 0))
 
+        # Each agent sees their msg first
+        alice_msgs = [state.agent_comm[0], state.agent_comm[1]]
+        bob_msgs = [state.agent_comm[1], state.agent_comm[0]]
+
+        alice_obs = [alice_obs, alice_msgs]
+        bob_obs = [bob_obs, bob_msgs]
+
         return {"agent_0": alice_obs, "agent_1": bob_obs}
 
-    def step_agents(
-        self,
-        key: chex.PRNGKey,
-        state: State,
-        action: chex.Array,
-    ) -> Tuple[State, float]:
+    def step_agents(self, key: chex.PRNGKey, state: State, action: chex.Array,
+                    msgs: chex.Array) -> Tuple[State, float]:
+
+        is_comm_action = jnp.equal(action, Actions.comm)
+        is_comm_action_transposed = jnp.expand_dims(is_comm_action, 1)
+        actual_msgs = is_comm_action_transposed * msgs
 
         # Update agent position (forward action)
         # 'is_move_action' is an array of size number of agents, and each of
@@ -733,6 +774,7 @@ class Overcooked(MultiAgentEnv):
                               agent_dir=agent_dir,
                               agent_inv=agent_inv,
                               maze_map=maze_map,
+                              agent_comm=actual_msgs,
                               terminal=False), reward)
 
     def process_interact(self, maze_map: chex.Array, wall_map: chex.Array,

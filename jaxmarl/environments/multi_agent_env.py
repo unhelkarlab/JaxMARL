@@ -50,17 +50,15 @@ class MultiAgentEnv(object):
 
     @partial(jax.jit, static_argnums=(0, ))
     def step(
-        self,
-        key: chex.PRNGKey,
-        state: State,
-        actions: Dict[str, chex.Array],
+        self, key: chex.PRNGKey, state: State, actions: Dict[str, chex.Array],
+        msgs: chex.Array
     ) -> Tuple[Dict[str, chex.Array], State, Dict[str, float], Dict[str, bool],
                Dict]:
         """Performs step transitions in the environment."""
 
         key, key_reset = jax.random.split(key)
         obs_st, states_st, rewards, dones, infos = self.step_env(
-            key, state, actions)
+            key, state, actions, msgs)
 
         obs_re, states_re = self.reset(key_reset)
 

@@ -50,8 +50,9 @@ def step(env, action, extras):
     # print(subkey[0])
     # print(extras['state'])
     # print(actions)
+    comm = ['Hi, how are you doing', 'Good, what about you']
     obs, state, reward, done, info = env.step_env(subkey, extras['state'],
-                                                  actions)
+                                                  actions, comm)
 
     extras['obs'] = obs
     extras['state'] = state
