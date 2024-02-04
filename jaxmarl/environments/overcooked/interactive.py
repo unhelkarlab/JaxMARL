@@ -42,17 +42,25 @@ def reset(key, env, extras):
 def step(env, action, extras):
     key, subkey = jax.random.split(extras['rng'])
 
-    actions = {"agent_0": jnp.array(action), "agent_1": jnp.array(action)}
-    print("Actions : ", actions)
+    actions = {
+        "agent_0": {
+            'actions': jnp.array(action),
+            'msgs': jnp.array([0, 0])
+        },
+        "agent_1": {
+            'actions': jnp.array(action),
+            'msgs': jnp.array([1, 1])
+        }
+    }
     # obs, state, reward, done, info = jax.jit(env.step_env)(subkey,
     #                                                        extras['state'],
     #                                                        actions)
     # print(subkey[0])
     # print(extras['state'])
     # print(actions)
-    comm = ['Hi, how are you doing', 'Good, what about you']
+    # msg_idx = jnp.array([[0, 0], [1, 1]])
     obs, state, reward, done, info = env.step_env(subkey, extras['state'],
-                                                  actions, comm)
+                                                  actions)
 
     extras['obs'] = obs
     extras['state'] = state

@@ -6,44 +6,22 @@ import jax
 from jaxmarl import make
 from jaxmarl.viz.overcooked_visualizer import OvercookedVisualizer
 from jaxmarl.environments.overcooked import Overcooked, overcooked_layouts, layout_grid_to_dict
-from jaxmarl.environments.overcooked.overcooked import Actions, Communication
+from jaxmarl.environments.overcooked.overcooked import Actions, Msg_Template
 import time
 import random
-from transformers import RobertaTokenizer
 import jax.numpy as jnp
 import numpy as np
-
-tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
 
 
 def gen_random_actions(env, key):
     # Sample random actions
-    key = jax.random.split(key, env.num_agents)
+    key_a = jax.random.split(key, env.num_agents)
     actions = {
-        agent: env.action_space(agent).sample(key[i])
+        agent: env.action_space(agent).sample(key_a[i])
         for i, agent in enumerate(env.agents)
     }
-    # print('example action dict', actions)
 
-    # If the agents selects the communication action, randomly select a msg.
-    msgs = []
-    for key, value in actions.items():
-        if value == Actions.comm:
-            rand_option = random.sample(Communication.info_options, k=1)
-            msg = Communication.info_template + rand_option[0]
-        else:
-            msg = ''
-        encoded_text = tokenizer.encode_plus(msg,
-                                             add_special_tokens=True,
-                                             truncation=True,
-                                             max_length=128,
-                                             padding='max_length',
-                                             return_attention_mask=True,
-                                             return_tensors='np')
-        msgs.append(encoded_text['input_ids'][0])
-
-    msgs = jnp.array(np.array(msgs))
-    return actions, msgs
+    return actions
 
 
 # Parameters + random keys
@@ -79,10 +57,10 @@ for _ in range(max_steps):
     # Iterate random keys and sample actions
     key, key_s, key_a = jax.random.split(key, 3)
 
-    actions, msgs = gen_random_actions(env, key_a)
+    actions = gen_random_actions(env, key_a)
 
     # Step environment
-    obs, state, rewards, dones, infos = env.step(key_s, state, actions, msgs)
+    obs, state, rewards, dones, infos = env.step(key_s, state, actions)
 
 # viz = OvercookedVisualizer()
 

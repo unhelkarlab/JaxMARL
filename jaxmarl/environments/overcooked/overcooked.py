@@ -33,30 +33,13 @@ class Actions(IntEnum):
     stay = 4
     interact = 5
     done = 6
-    comm = 7
 
 
-# class Communication():
-#     info_template = 11 # 'I am going to '
-#     info_options = [
-#         OBJECT_TO_INDEX['onion_pile'], OBJECT_TO_INDEX['plate_pile'],
-#         OBJECT_TO_INDEX['goal'], OBJECT_TO_INDEX['pot'],
-#         OBJECT_TO_INDEX['dish']
-#     ]
-
-#     request_template = 12 # 'I need '
-#     request_options = [
-#         OBJECT_TO_INDEX['onion'], OBJECT_TO_INDEX['plate'],
-#         OBJECT_TO_INDEX['dish']
-#     ]
-
-
-class Communication():
-    info_template = 'I am going to '
-    info_options = ['onion_pile', 'plate_pile', 'goal', 'pot', 'dish']
-
-    request_template = 'I need '
-    request_options = ['onion', 'plate', 'dish']
+class Msg_Template():
+    templates = ['', 'I am going to ', 'I need ']
+    options = [
+        '', 'onion', 'onion pile', 'plate', 'plate pile', 'goal', 'pot', 'dish'
+    ]
 
 
 @struct.dataclass
@@ -114,17 +97,51 @@ class Overcooked(MultiAgentEnv):
 
         # TODO: Need to change
         self.action_set = jnp.array([
-            Actions.right, Actions.down, Actions.left, Actions.up,
-            Actions.stay, Actions.interact, Actions.comm
+            Actions.right,
+            Actions.down,
+            Actions.left,
+            Actions.up,
+            Actions.stay,
+            Actions.interact,
         ])
         self.tokenizer = tokenizer
+        self.max_length = 16
+        self.msg_matrix = self._tokenize_msgs()
+        self.empty_msg = self.msg_matrix[0, 0, :]
 
         self.random_reset = random_reset
         self.max_steps = max_steps
 
+    def _tokenize_msgs(self) -> chex.Array:
+        """
+        Produce a matrix of size: 
+        (number of templates, number of options, length of text embedding)
+
+        The inner most array represents the text embeddings of a certain 
+        message composed of a template + an option.
+        """
+        msg_matrix = []
+        for i in range(len(Msg_Template.templates)):
+            row = []
+            for j in range(len(Msg_Template.options)):
+                text = Msg_Template.templates[i] + Msg_Template.options[j]
+                encoded_text = self.tokenizer.encode_plus(
+                    text,
+                    add_special_tokens=True,
+                    truncation=True,
+                    max_length=self.max_length,
+                    padding='max_length',
+                    return_attention_mask=True,
+                    return_tensors='np')
+                row.append(encoded_text['input_ids'][0])
+            row = jnp.array(np.array(row))
+            msg_matrix.append(row)
+        msg_matrix = jnp.array(np.array(msg_matrix))
+
+        return msg_matrix
+
     def step_env(
-        self, key: chex.PRNGKey, state: State, actions: Dict[str, chex.Array],
-        msgs: chex.Array
+        self, key: chex.PRNGKey, state: State, actions: Dict[str, spaces.Dict]
     ) -> Tuple[Dict[str, chex.Array], State, Dict[str, float], Dict[str, bool],
                Dict]:
         """
@@ -143,8 +160,13 @@ class Overcooked(MultiAgentEnv):
         """
         # acts is an array containing the action of each agent
         # '.take()' takes elements from an array along an axis.
-        acts = self.action_set.take(
-            indices=jnp.array([actions["agent_0"], actions["agent_1"]]))
+        acts = self.action_set.take(indices=jnp.array(
+            [actions["agent_0"]['actions'], actions["agent_1"]['actions']]))
+
+        msgs_idx_transpose = jnp.transpose(
+            jnp.vstack(
+                [actions["agent_0"]['msgs'], actions["agent_1"]['msgs']]))
+        msgs = self.msg_matrix[msgs_idx_transpose[0], msgs_idx_transpose[1], :]
 
         # Execute the agents' actions in the environment
         state, reward = self.step_agents(key, state, acts, msgs)
@@ -312,18 +334,7 @@ class Overcooked(MultiAgentEnv):
             (1-random_reset) * jnp.array(
                 [OBJECT_TO_INDEX['empty'], OBJECT_TO_INDEX['empty']])
 
-        agent_comm = []
-        for i in range(len(self.agents)):
-            encoded_text = self.tokenizer.encode_plus(
-                '',
-                add_special_tokens=True,
-                truncation=True,
-                max_length=128,
-                padding='max_length',
-                return_attention_mask=True,
-                return_tensors='np')
-            agent_comm.append(encoded_text['input_ids'][0])
-        agent_comm = jnp.array(np.array(agent_comm))
+        agent_comm = jnp.vstack([self.empty_msg, self.empty_msg])
 
         state = State(
             agent_pos=agent_pos,
@@ -343,7 +354,7 @@ class Overcooked(MultiAgentEnv):
 
         return lax.stop_gradient(obs), lax.stop_gradient(state)
 
-    def get_obs(self, state: State) -> Dict[str, chex.Array]:
+    def get_obs(self, state: State) -> Dict[str, spaces.Dict]:
         """
         Return a full observation, of size (height x width x n_layers), where
         n_layers = 26, together with the communication msgs.
@@ -535,17 +546,13 @@ class Overcooked(MultiAgentEnv):
         alice_msgs = [state.agent_comm[0], state.agent_comm[1]]
         bob_msgs = [state.agent_comm[1], state.agent_comm[0]]
 
-        alice_obs = [alice_obs, alice_msgs]
-        bob_obs = [bob_obs, bob_msgs]
+        alice_obs_msgs = {'obs': alice_obs, 'msgs': alice_msgs}
+        bob_obs_msgs = {'obs': bob_obs, 'msgs': bob_msgs}
 
-        return {"agent_0": alice_obs, "agent_1": bob_obs}
+        return {"agent_0": alice_obs_msgs, "agent_1": bob_obs_msgs}
 
     def step_agents(self, key: chex.PRNGKey, state: State, action: chex.Array,
                     msgs: chex.Array) -> Tuple[State, float]:
-
-        is_comm_action = jnp.equal(action, Actions.comm)
-        is_comm_action_transposed = jnp.expand_dims(is_comm_action, 1)
-        actual_msgs = is_comm_action_transposed * msgs
 
         # Update agent position (forward action)
         # 'is_move_action' is an array of size number of agents, and each of
@@ -774,7 +781,7 @@ class Overcooked(MultiAgentEnv):
                               agent_dir=agent_dir,
                               agent_inv=agent_inv,
                               maze_map=maze_map,
-                              agent_comm=actual_msgs,
+                              agent_comm=msgs,
                               terminal=False), reward)
 
     def process_interact(self, maze_map: chex.Array, wall_map: chex.Array,
@@ -909,18 +916,28 @@ class Overcooked(MultiAgentEnv):
     @property
     def num_actions(self) -> int:
         """Number of actions possible in environment."""
-        return len(self.action_set)
+        return len(self.action_set) * len(Msg_Template.templates) * len(
+            Msg_Template.options)
 
-    def action_space(self, agent_id="") -> spaces.Discrete:
+    def action_space(self, agent_id="") -> spaces.Dict:
         """
         Action space of the environment. Agent_id not used since action_space
         is uniform for all agents
         """
-        return spaces.Discrete(len(self.action_set), dtype=jnp.uint32)
+        actions = spaces.Discrete(len(self.action_set), dtype=jnp.uint32)
+        msgs = spaces.MultiDiscrete(
+            [len(Msg_Template.templates),
+             len(Msg_Template.options)])
+        return spaces.Dict({'actions': actions, 'msgs': msgs})
 
-    def observation_space(self) -> spaces.Box:
+    def observation_space(self) -> spaces.Dict:
         """Observation space of the environment."""
-        return spaces.Box(0, 255, self.obs_shape)
+        obs = spaces.Box(0, 255, self.obs_shape)
+        msgs = spaces.Box(0,
+                          jax.dtypes.iinfo(jnp.uint32).max,
+                          (2, self.max_length),
+                          dtype=jnp.uint32)
+        return spaces.Dict({'obs': obs, 'msgs': msgs})
 
     def state_space(self) -> spaces.Dict:
         """State space of the environment."""
@@ -937,6 +954,10 @@ class Overcooked(MultiAgentEnv):
             "maze_map":
             spaces.Box(0,
                        255, (w + agent_view_size, h + agent_view_size, 3),
+                       dtype=jnp.uint32),
+            "agent_comm":
+            spaces.Box(0,
+                       jax.dtypes.iinfo(jnp.uint32).max, (2, self.max_length),
                        dtype=jnp.uint32),
             "time":
             spaces.Discrete(self.max_steps),
