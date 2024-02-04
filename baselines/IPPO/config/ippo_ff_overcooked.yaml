@@ -12,6 +12,6 @@
 "MAX_GRAD_NORM": 0.5
 "ACTIVATION": "tanh"
 "ENV_NAME": "overcooked"
-"ENV_KWARGS": 
-  "layout" : "cramped_room"
+"ENV_KWARGS":
+  "layout": "cramped_room"
 "ANNEAL_LR": True
