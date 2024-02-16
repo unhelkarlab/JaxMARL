@@ -43,14 +43,8 @@ def step(env, action, extras):
     key, subkey = jax.random.split(extras['rng'])
 
     actions = {
-        "agent_0": {
-            'actions': jnp.array(action),
-            'msgs': jnp.array([0, 0])
-        },
-        "agent_1": {
-            'actions': jnp.array(action),
-            'msgs': jnp.array([1, 1])
-        }
+        "agent_0": jnp.array([action, 0, 0]),
+        "agent_1": jnp.array([action, 1, 1])
     }
     # obs, state, reward, done, info = jax.jit(env.step_env)(subkey,
     #                                                        extras['state'],

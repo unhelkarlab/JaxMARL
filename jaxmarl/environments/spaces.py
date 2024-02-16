@@ -55,6 +55,7 @@ class MultiDiscrete(Space):
         self.shape = (len(num_categories), )
         # self.dtype = jnp.int_
         self.dtype = jnp.uint32
+        self.n = jnp.array(num_categories)
 
     def sample(self, rng: chex.PRNGKey) -> chex.Array:
         """Sample random action uniformly from set of categorical choices."""
@@ -87,6 +88,7 @@ class Box(Space):
         self.high = high
         self.shape = shape
         self.dtype = dtype
+        self.n = -1
 
     def sample(self, rng: chex.PRNGKey) -> chex.Array:
         """Sample random action uniformly from 1D continuous range."""
@@ -110,6 +112,17 @@ class Dict(Space):
     def __init__(self, spaces: dict):
         self.spaces = spaces
         self.num_spaces = len(spaces)
+
+        self.n = []
+        for _, space in self.spaces.items():
+            if isinstance(space.n, int):
+                self.n.append(space.n)
+            else:
+                self.n.extend(space.n)
+
+        self.shape = []
+        for _, space in self.spaces.items():
+            self.shape.append(space.shape)
 
     def sample(self, rng: chex.PRNGKey) -> dict:
         """Sample random action from all subspaces."""
