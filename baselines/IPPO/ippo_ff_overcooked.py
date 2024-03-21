@@ -358,7 +358,7 @@ def main(config):
     print('Execution time: ', execution_time)
 
     print('** Saving Results **')
-    filename = f'{config["ENV_NAME"]}_cramped_room_new'
+    filename = f'{config["ENV_NAME"]}_cramped_room_new_new'
     rewards = out["metrics"]["returned_episode_returns"].mean(-1).reshape(
         (num_seeds, -1))
     reward_mean = rewards.mean(0)  # mean
