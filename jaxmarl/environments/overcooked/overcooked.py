@@ -497,6 +497,7 @@ class Overcooked(MultiAgentEnv):
         alice_obs = jnp.transpose(alice_obs, (1, 2, 0))
         bob_obs = jnp.transpose(bob_obs, (1, 2, 0))
 
+        print(alice_obs)
         return {"agent_0": alice_obs, "agent_1": bob_obs}
 
     def step_agents(
