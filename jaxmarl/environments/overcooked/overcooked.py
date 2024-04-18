@@ -876,6 +876,10 @@ class Overcooked(MultiAgentEnv):
         """
         return spaces.Discrete(len(self.action_set), dtype=jnp.uint32)
 
+    @property
+    def num_obs(self) -> int:
+        return self.obs_shape[0] * self.obs_shape[1] * self.obs_shape[2]
+
     def observation_space(self) -> spaces.Box:
         """Observation space of the environment."""
         return spaces.Box(0, 255, self.obs_shape)
