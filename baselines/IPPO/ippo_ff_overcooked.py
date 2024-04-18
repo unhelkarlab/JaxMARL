@@ -22,6 +22,141 @@ import time
 
 import matplotlib.pyplot as plt
 
+import os
+import shutil
+import orbax.checkpoint
+from flax.training import orbax_utils
+
+from jax_tqdm import scan_tqdm
+# from tqdm import tqdm
+
+# import time
+# import datetime
+# from jax.experimental import host_callback
+
+# def progress_bar_scan(num_samples, message=None):
+#     "Progress bar for a JAX scan"
+#     if message is None:
+#         message = f"Running for {num_samples} iterations"
+#     tqdm_bars = {}
+
+#     if num_samples > 20:
+#         print_rate = int(num_samples / 20)
+#     else:
+#         print_rate = 1  # if you run the sampler for less than 20 iterations
+#     remainder = num_samples % print_rate
+
+#     def _define_tqdm(arg, transform):
+#         tqdm_bars[0] = tqdm(range(num_samples))
+#         tqdm_bars[0].set_description(message, refresh=False)
+
+#     def _update_tqdm(arg, transform):
+#         tqdm_bars[0].update(arg)
+
+#     def _update_progress_bar(iter_num):
+#         "Updates tqdm progress bar of a JAX scan or loop"
+#         _ = jax.lax.cond(
+#             iter_num == 0,
+#             lambda _: host_callback.id_tap(_define_tqdm, None, result=iter_num
+#                                            ),
+#             lambda _: iter_num,
+#             operand=None,
+#         )
+
+#         _ = jax.lax.cond(
+#             # update tqdm every multiple of `print_rate` except at the end
+#             (iter_num % print_rate == 0) &
+#             (iter_num != num_samples - remainder),
+#             lambda _: host_callback.id_tap(
+#                 _update_tqdm, print_rate, result=iter_num),
+#             lambda _: iter_num,
+#             operand=None,
+#         )
+
+#         _ = jax.lax.cond(
+#             # update tqdm by `remainder`
+#             iter_num == num_samples - remainder,
+#             lambda _: host_callback.id_tap(
+#                 _update_tqdm, remainder, result=iter_num),
+#             lambda _: iter_num,
+#             operand=None,
+#         )
+
+#     def _close_tqdm(arg, transform):
+#         tqdm_bars[0].close()
+
+#     def close_tqdm(result, iter_num):
+#         return jax.lax.cond(
+#             iter_num == num_samples - 1,
+#             lambda _: host_callback.id_tap(_close_tqdm, None, result=result),
+#             lambda _: result,
+#             operand=None,
+#         )
+
+#     def _progress_bar_scan(func):
+#         """Decorator that adds a progress bar to `body_fun` used in `lax.scan`.
+#         Note that `body_fun` must either be looping over `np.arange(num_samples)`,
+#         or be looping over a tuple who's first element is `np.arange(num_samples)`
+#         This means that `iter_num` is the current iteration number
+#         """
+
+#         def wrapper_progress_bar(carry, x):
+#             if type(x) is tuple:
+#                 iter_num, *_ = x
+#             else:
+#                 iter_num = x
+#             _update_progress_bar(iter_num)
+#             result = func(carry, x)
+#             return close_tqdm(result, iter_num)
+
+#         return wrapper_progress_bar
+
+#     return _progress_bar_scan
+
+# def _print_consumer(arg, transform):
+#     iter_num, num_samples = arg
+#     print(f"Iteration {iter_num:,} / {num_samples:,}")
+#     print(datetime.datetime.fromtimestamp(time.time()).strftime('%c'))
+
+# @jax.jit
+# def progress_bar(arg, result):
+#     """
+#     Print progress of a scan/loop only if the iteration number is a multiple of
+#     the print_rate
+
+#     Usage: 'carry = progress_bar((iter_num + 1, num_samples, print_rate), carry)'
+#     Pass in 'iter_num + 1' so that counting starts at 1 and ends at 'num_samples'
+
+#     """
+#     iter_num, num_samples, print_rate = arg
+#     result = jax.lax.cond(
+#         iter_num % print_rate == 0,
+#         lambda _: host_callback.id_tap(_print_consumer,
+#                                        (iter_num, num_samples),
+#                                        result=result),
+#         lambda _: result,
+#         operand=None)
+#     return result
+
+# def progress_bar_scan(num_samples):
+
+#     def _progress_bar_scan(func):
+#         print_rate = int(num_samples / 10)
+
+#         def wrapper_progress_bar(carry, iter_num):
+#             iter_num = progress_bar((iter_num + 1, num_samples, print_rate),
+#                                     iter_num)
+#             return func(carry, iter_num)
+
+#         return wrapper_progress_bar
+
+#     return _progress_bar_scan
+
+# import wandb
+
+# wandb.login()
+# wandb.init(project="comp646-project", entity="billqian")
+
 
 class ActorCritic(nn.Module):
     action_dim: Sequence[int]
@@ -85,7 +220,7 @@ def get_rollout(train_state, config):
     init_x = init_x.flatten()
 
     network.init(key_a, init_x)
-    network_params = train_state.params
+    network_params = train_state['params']
 
     done = False
 
@@ -176,6 +311,8 @@ def make_train(config):
         obsv, env_state = jax.vmap(env.reset, in_axes=(0, ))(reset_rng)
 
         # TRAIN LOOP
+        @scan_tqdm(int(config["NUM_UPDATES"]))
+        # @progress_bar_scan(int(config["NUM_UPDATES"]))
         def _update_step(runner_state, unused):
             # COLLECT TRAJECTORIES
             def _env_step(runner_state, unused):
@@ -326,12 +463,18 @@ def make_train(config):
             rng = update_state[-1]
 
             runner_state = (train_state, env_state, last_obs, rng)
+
+            # rewards = metric["returned_episode_returns"].mean(-1)
+            # reward_mean = rewards.mean(0)
+            # wandb.log({'return': reward_mean})
+
             return runner_state, metric
 
         rng, _rng = jax.random.split(rng)
         runner_state = (train_state, env_state, obsv, _rng)
-        runner_state, metric = jax.lax.scan(_update_step, runner_state, None,
-                                            config["NUM_UPDATES"])
+        runner_state, metric = jax.lax.scan(
+            _update_step, runner_state, jnp.arange(config["NUM_UPDATES"])
+        )  # None for -2, config["NUM_UPDATES"] for -1
         return {"runner_state": runner_state, "metrics": metric}
 
     return train
@@ -358,7 +501,7 @@ def main(config):
     print('Execution time: ', execution_time)
 
     print('** Saving Results **')
-    filename = f'{config["ENV_NAME"]}_cramped_room_new_new'
+    filename = f'{config["ENV_NAME"]}_cramped_room_full'
     rewards = out["metrics"]["returned_episode_returns"].mean(-1).reshape(
         (num_seeds, -1))
     reward_mean = rewards.mean(0)  # mean
@@ -376,10 +519,38 @@ def main(config):
 
     # animate first seed
     train_state = jax.tree_map(lambda x: x[0], out["runner_state"][0])
-    state_seq = get_rollout(train_state, config)
+    save_ckpt(train_state, config)
+    ckpt = restore_ckpt()
+    # print(ckpt['model']['params'])
+    # print(ckpt['config'])
+    state_seq = get_rollout(ckpt['model'], ckpt['config'])
+    # state_seq = get_rollout(train_state, config)
     viz = OvercookedVisualizer()
     # agent_view_size is hardcoded as it determines the padding around the layout.
     viz.animate(state_seq, agent_view_size=5, filename=f"{filename}.gif")
+
+
+def save_ckpt(train_state, config):
+    ckpt_dir = '/Users/billqian/Documents/Graduate-Rice-University/' + \
+        'Research/JaxMARL/baselines/IPPO/overcooked_ckpt'
+    if os.path.exists(ckpt_dir):
+        print('yes')
+        shutil.rmtree(ckpt_dir)
+
+    ckpt = {'model': train_state, 'config': config}
+    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+    save_args = orbax_utils.save_args_from_target(ckpt)
+    orbax_checkpointer.save(ckpt_dir + '/orbax/single_save',
+                            ckpt,
+                            save_args=save_args)
+
+
+def restore_ckpt():
+    ckpt_dir = '/Users/billqian/Documents/Graduate-Rice-University/' + \
+        'Research/JaxMARL/baselines/IPPO/overcooked_ckpt'
+
+    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+    return orbax_checkpointer.restore(ckpt_dir + '/orbax/single_save')
 
 
 if __name__ == "__main__":
