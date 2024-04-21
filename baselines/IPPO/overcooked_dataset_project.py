@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import flax.linen as nn
 import numpy as np
 from flax.linen.initializers import constant, orthogonal
+from typing import Sequence, NamedTuple, Any
 import distrax
 import jaxmarl
 from jaxmarl.wrappers.baselines import LogWrapper
@@ -17,6 +18,7 @@ from jaxmarl.viz.overcooked_visualizer import OvercookedVisualizer
 import hydra
 from omegaconf import OmegaConf
 import random
+import os
 
 import orbax.checkpoint
 
@@ -24,10 +26,15 @@ import imitation.data.types as types
 import imitation.data.rollout as rollout
 from imitation.data import serialize
 from imitation.algorithms import bc
+from imitation.util import logger as imit_logger
 
 import gymnasium
+import torch
+from stable_baselines3.common import policies, torch_layers
 
 from transformers import RobertaTokenizer
+
+import wandb
 
 # Maximum length of tokens encoded by RoBERTa
 TOKENIZER_MAX_LENGTH = 16
@@ -303,16 +310,119 @@ def restore_ckpt():
     return orbax_checkpointer.restore(ckpt_dir + '/orbax/single_save')
 
 
-def train_bc_agent(obs_space, action_space, transitions, rng, n_epochs=10):
+class CustomBCLogger(bc.BCLogger):
+    """
+    Create a custom logger to log additional info and output all the info to 
+    wandb.
+    """
+
+    def __init__(self, logger, test_transitions, bc_trainer, wandb_run=None):
+        """
+        Args:
+        - bc_trainer: the behavior cloning agent that is being trained
+        - wandb_run: a run object returned from wandb.init()
+        """
+        super().__init__(logger)
+        self.test_transitions = test_transitions
+        self.bc_trainer = bc_trainer
+        self.wandb_run = wandb_run
+
+    def log_batch(
+        self,
+        batch_num: int,
+        batch_size: int,
+        num_samples_so_far: int,
+        training_metrics,
+        rollout_stats,
+    ):
+        self._logger.record("batch_size", batch_size)
+        self._logger.record("bc/epoch", self._current_epoch)
+        self._logger.record("bc/batch", batch_num)
+        self._logger.record("bc/samples_so_far", num_samples_so_far)
+        for k, v in training_metrics.__dict__.items():
+            value = float(v) if v is not None else None
+            name = f"bc/{k}"
+            if name == 'bc/loss':
+                name = 'bc/training_loss'
+            self._logger.record(name, value)
+            if self.wandb_run is not None:
+                self.wandb_run.log({name: value})
+
+        # Compute test loss
+        with torch.no_grad():
+            training_metrics = self.bc_trainer.loss_calculator(
+                self.bc_trainer.policy, self.test_transitions.obs,
+                self.test_transitions.acts)
+            self._logger.record('bc/test_loss', training_metrics.loss.item())
+            if self.wandb_run is not None:
+                self.wandb_run.log(
+                    {'bc/test_loss': training_metrics.loss.item()})
+
+        self._logger.dump(self._tensorboard_step)
+        self._tensorboard_step += 1
+
+    def reset_tensorboard_steps(self):
+        self._tensorboard_step = 0
+
+
+class FeedForward64Policy(policies.ActorCriticPolicy):
+    """
+    A feed forward policy network with two hidden layers of 64 units.
+    """
+
+    def __init__(self, *args, **kwargs):
+        """
+        Builds FeedForward64Policy; arguments passed to `ActorCriticPolicy`.
+        """
+        super().__init__(*args, **kwargs, net_arch=[64, 64])
+
+
+def train_bc_agent(obs_space,
+                   action_space,
+                   train_transitions,
+                   test_transitions,
+                   rng,
+                   lang,
+                   n_epochs=20):
     """
     Train a behavior cloning agent.
     """
-    bc_trainer = bc.BC(
-        observation_space=obs_space,
-        action_space=action_space,
-        demonstrations=transitions,
-        rng=rng,
-    )
+    # Set up a behavior cloning agent.
+    if lang:
+        extractor = (torch_layers.CombinedExtractor if isinstance(
+            obs_space, gymnasium.spaces.Dict) else
+                     torch_layers.FlattenExtractor)
+        policy = FeedForward64Policy(
+            observation_space=obs_space,
+            action_space=action_space,
+            # Set lr_schedule to max value to force error if policy.optimizer
+            # is used by mistake (should use self.optimizer instead).
+            lr_schedule=lambda _: torch.finfo(torch.float32).max,
+            features_extractor_class=extractor,
+        )
+        bc_trainer = bc.BC(observation_space=obs_space,
+                           action_space=action_space,
+                           demonstrations=train_transitions,
+                           rng=rng,
+                           policy=policy)
+    else:
+        bc_trainer = bc.BC(observation_space=obs_space,
+                           action_space=action_space,
+                           demonstrations=train_transitions,
+                           rng=rng)
+    # Login and initialize wandb
+    wandb.login()
+    run = wandb.init(project='646-project', entity='billqian')
+    # Use a custom logger for the behavior cloning agent.
+    curr_dir = os.getcwd()
+    logging_dir = os.path.join(curr_dir, 'results/')
+    logger = imit_logger.configure(logging_dir, ['stdout', 'csv'])
+    custom_logger = CustomBCLogger(logger,
+                                   test_transitions,
+                                   bc_trainer,
+                                   wandb_run=run)
+    bc_trainer._bc_logger = custom_logger
+    # Train the behavior cloning agent.
     bc_trainer.train(n_epochs=n_epochs)
 
 
@@ -330,18 +440,26 @@ def main(config):
     # print(ckpt['model']['params'])
     # print(ckpt['config'])
     print('Collect trajectories...')
-    get_rollout(ckpt['model'],
-                ckpt['config'],
-                num_traj=10,
-                lang=lang,
-                tokenizer=tokenizer)
+    # get_rollout(ckpt['model'],
+    #             ckpt['config'],
+    #             num_traj=50,
+    #             lang=lang,
+    #             tokenizer=tokenizer)
 
     # Load trajectories and flatten into transitions
     if lang:
         all_trajs = serialize.load('trajs/labeled_trajs')
     else:
         all_trajs = serialize.load('trajs/unlabeled_trajs')
-    transitions = rollout.flatten_trajectories(all_trajs)
+    # Divide the trajectories into a training set and a test set
+    all_trajs = list(all_trajs)
+    print(len(all_trajs[0].acts))
+    return
+    random.Random(0).shuffle(all_trajs)
+    train_frac = 0.8
+    train_size = int(len(all_trajs) * train_frac)
+    train_transitions = rollout.flatten_trajectories(all_trajs[:train_size])
+    test_transitions = rollout.flatten_trajectories(all_trajs[train_size:])
 
     # Prepare to train a Behavior Cloning (BC) agent
     env = jaxmarl.make(config["ENV_NAME"], **config["ENV_KWARGS"])
@@ -353,7 +471,8 @@ def main(config):
         obs_space = gymnasium.spaces.Box(0, 255, (env.num_obs, ))
     action_space = gymnasium.spaces.Discrete(env.num_actions, seed=rng)
     print('Train BC agent...')
-    train_bc_agent(obs_space, action_space, transitions, rng)
+    train_bc_agent(obs_space, action_space, train_transitions,
+                   test_transitions, rng, lang)
 
     # viz = OvercookedVisualizer()
     # # agent_view_size is hardcoded as it determines the padding around the layout.
